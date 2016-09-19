@@ -1,5 +1,6 @@
 library(nlme)
 library(mvtnorm)
+library(parallel)
 
 setwd('~/Dropbox/Research/pestControlLandscape')
 
@@ -40,19 +41,80 @@ makeV <- function(nfarm, nsite, nrep) {
     return(dat)
 }
 
+
 ## simulate model
-simMod <- function(nsim, dat, b, sig.farm, sig.site, sig.resid, r.spCor) {
-    sp <- rmvnorm(nsim, rep(0, length(unique(dat$site))), )
-    # dat$y <- 
+simMod <- function(nsim, nfarm, nsite, nrep, b, sig.farm, sig.site, sig.resid, r.spCor) {
+    ## make the explanitory vars
+    dat <- makeV(nfarm, nsite, nrep)
+    
+    ## jitter lon
+    dat$lon_up <- dat$lon + 1:nrow(dat) / 100000000
+    
+    ## simulate the spatial part
+    datUnique <- dat[!duplicated(dat$site), ]
+    sp <- rmvnorm(nsim, sigma = expCoVar(datUnique, r.spCor, sig.resid), 
+                    method = 'chol')
+    spDup <- sp[, rep(1:nrow(datUnique), each = nrep)]
+    
+    ## loop over number of simulations, returning difference between known and estimated parameters
+    out <- mclapply(1:nsim, mc.cores = 6, FUN = function(i) {
+        dat$y <- b * dat$x + rnorm(nfarm, sd = sig.farm)[dat$farm] + 
+            rnorm(nsite*nfarm, sd = sig.site)[dat$site] + spDup[i, ]
+        mod <- lme(fixed = y ~ 0 + x, random = ~1 | farm, correlation = corExp(form = ~lon_up + lat), 
+                   method = 'ML', data = dat, control = lmeControl(opt = 'optim'))
+        
+        return(mod$coefficients$fixed - b)
+    })
+    
+    out <- unlist(out)
+    names(out) <- NULL
+    
+    return(out)
 }
 
 
+## loop over several sig.site values and 2 r.spCor values
 
-# Mean_FourthStand_NPerEffort ~ LC1Gau250 + LC2Gau250 + LC3Gau250 + LC4Gau250 + LC5Gau250
-# ~1 | Farm
+sigs.site <- seq(0.5, 4, length = 8)
+rs.spCor <- c(0.1, 1)
 
-mod <- lme(fixed=formula(paste(response,covariates,LUC)),
-    random=random, 
-    correlation=corExp(form=~X_up+Y_up|Farm),
-    method="ML",
-    data=df6)
+out <- lapply(sigs.site, function(s) {
+    res <- sapply(rs.spCor, function(r) {
+        res <- simMod(nsim = 500, nfarm = 20, nsite = 5, nrep = 3, b = 10, 
+                      sig.farm = 1.5, sig.site = s, sig.resid = 2, r.spCor = r)
+        c(mean(res), quantile(res, prob = c(0.025, 0.975)))
+    })
+    
+    res <- cbind(rs.spCor, t(res))
+    colnames(res) <- c('r', 'mean', 'ci0.025', 'ci0.975')
+    
+    return(res)
+})
+
+out <- as.data.frame(cbind(s = rep(sigs.site, each = length(rs.spCor)), do.call(rbind, out)))
+
+
+## plot it
+ylim <- max(abs(range(out[, 3:5]))) * c(-1, 1)
+
+pdf(file = 'fig_jitterSim.pdf', width = 6, height = 6)
+par(mfcol = c(length(rs.spCor), 1), mar = c(1, 0, 1, 2) + 0.1, oma = c(3, 4, 0, 0) + 0.1)
+
+for(i in length(rs.spCor):1) {
+    with(out[out$r == rs.spCor[i], ], {
+         plot(s, mean, ylim = ylim, xaxt = 'n',
+              pch = 21, bg = 'white', cex = 1.2,
+              panel.first = {
+                  abline(h = 0, col = 'gray')
+                  arrows(x0 = s, y0 = ci0.025, y1 = ci0.975,
+                         code = 3, length =  0.075, angle = 90)
+              })
+         mtext(substitute(rho == r, list(r = rs.spCor[i])), side = 4, line = 1)
+    })
+}
+
+axis(1)
+mtext('SD of repeated measures', side = 1, line = 1.5, outer = TRUE)
+mtext(expression('Difference between true and estimated'~beta), side = 2, line = 2.5, outer = TRUE)
+
+dev.off()
