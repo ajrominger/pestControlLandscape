@@ -60,10 +60,15 @@ simMod <- function(nsim, nfarm, nsite, nrep, b, sig.farm, sig.site, sig.resid, r
     out <- mclapply(1:nsim, mc.cores = 6, FUN = function(i) {
         dat$y <- b * dat$x + rnorm(nfarm, sd = sig.farm)[dat$farm] + 
             rnorm(nsite*nfarm, sd = sig.site)[dat$site] + spDup[i, ]
-        mod <- lme(fixed = y ~ 0 + x, random = ~1 | farm, correlation = corExp(form = ~lon_up + lat), 
-                   method = 'ML', data = dat, control = lmeControl(opt = 'optim'))
+        mod <- try(lme(fixed = y ~ 0 + x, random = ~1 | farm, correlation = corExp(form = ~lon_up + lat), 
+                       method = 'ML', data = dat, control = lmeControl(opt = 'optim')),
+                   silent = TRUE)
         
-        return(mod$coefficients$fixed - b)
+        if(class(mod) == 'try-error') {
+            return(NA)
+        } else {
+            return(mod$coefficients$fixed - b)
+        }
     })
     
     out <- unlist(out)
@@ -82,16 +87,20 @@ out <- lapply(sigs.site, function(s) {
     res <- sapply(rs.spCor, function(r) {
         res <- simMod(nsim = 500, nfarm = 20, nsite = 5, nrep = 3, b = 10, 
                       sig.farm = 1.5, sig.site = s, sig.resid = 2, r.spCor = r)
-        c(mean(res), quantile(res, prob = c(0.025, 0.975)))
+        c(median(res, na.rm = TRUE), quantile(res, prob = c(0.025, 0.975), na.rm = TRUE), sum(!is.na(res)))
     })
     
     res <- cbind(rs.spCor, t(res))
-    colnames(res) <- c('r', 'mean', 'ci0.025', 'ci0.975')
+    colnames(res) <- c('r', 'mean', 'ci0.025', 'ci0.975', 'n')
     
     return(res)
 })
 
 out <- as.data.frame(cbind(s = rep(sigs.site, each = length(rs.spCor)), do.call(rbind, out)))
+
+
+## save output
+write.csv(out, file = 'sim_jitterRandomEffect.csv', row.names = FALSE)
 
 
 ## plot it
@@ -102,14 +111,14 @@ par(mfcol = c(length(rs.spCor), 1), mar = c(1, 0, 1, 2) + 0.1, oma = c(3, 4, 0, 
 
 for(i in length(rs.spCor):1) {
     with(out[out$r == rs.spCor[i], ], {
-         plot(s, mean, ylim = ylim, xaxt = 'n',
-              pch = 21, bg = 'white', cex = 1.2,
-              panel.first = {
-                  abline(h = 0, col = 'gray')
-                  arrows(x0 = s, y0 = ci0.025, y1 = ci0.975,
-                         code = 3, length =  0.075, angle = 90)
-              })
-         mtext(substitute(rho == r, list(r = rs.spCor[i])), side = 4, line = 1)
+        plot(s, mean, ylim = ylim, xaxt = 'n',
+             pch = 21, bg = 'white', cex = 1.2,
+             panel.first = {
+                 abline(h = 0, col = 'gray')
+                 arrows(x0 = s, y0 = ci0.025, y1 = ci0.975,
+                        code = 3, length =  0.075, angle = 90)
+             })
+        mtext(substitute(rho == r, list(r = rs.spCor[i])), side = 4, line = 1)
     })
 }
 
